@@ -1,0 +1,95 @@
+# Builds ty wheels from this fork (reflex/ty-patches) and attaches them to a GitHub release.
+#
+# Push a tag like `v0.0.97-reflex.1`. The wheels are versioned `0.0.97+reflex.1`, so they never
+# shadow an upstream release. Install with uv by adding the release page as a find-links source:
+#
+#   [tool.uv]
+#   find-links = ["https://github.com/reflex-dev/ty/releases/expanded_assets/v0.0.97-reflex.1"]
+#
+# Unlike upstream's release.yml, this skips PGO/BOLT, signing, PyPI and Docker.
+name: "Reflex release"
+
+on:
+  push:
+    tags: ["v*-reflex.*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build and release (e.g. v0.0.97-reflex.1); created if missing"
+        required: true
+
+permissions:
+  contents: read
+
+env:
+  TAG: ${{ inputs.tag || github.ref_name }}
+
+jobs:
+  build:
+    name: "Build ${{ matrix.target }}"
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: ubuntu-24.04, target: x86_64-unknown-linux-gnu, manylinux: "2_17" }
+          - { runner: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu, manylinux: "2_17" }
+          - { runner: macos-14, target: aarch64-apple-darwin }
+          - { runner: macos-14, target: x86_64-apple-darwin }
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - name: "Set the package version from the tag"
+        shell: bash
+        run: |
+          version="${TAG#v}"
+          version="${version/-reflex./+reflex.}"
+          echo "Building ty ${version}"
+          sed -i.bak -E "s/^version = \".*\"/version = \"${version}\"/" pyproject.toml
+          rm pyproject.toml.bak
+          grep -m1 '^version' pyproject.toml
+      - name: "Build wheel"
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          manylinux: ${{ matrix.manylinux || 'auto' }}
+          args: --release --locked --out dist
+      - name: "Smoke test"
+        if: ${{ matrix.target != 'x86_64-apple-darwin' }}
+        shell: bash
+        run: |
+          python3 -m venv .smoke
+          .smoke/bin/pip install dist/*.whl
+          .smoke/bin/ty --version
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.target }}
+          path: dist
+
+  release:
+    name: "Publish release"
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: wheels-*
+          path: dist
+          merge-multiple: true
+      - name: "Create or update the release"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          ls -l dist
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/*.whl --clobber
+          else
+            gh release create "$TAG" dist/*.whl --target "$GITHUB_SHA" --prerelease \
+              --title "ty ${TAG#v} (reflex patches)" \
+              --notes "ty with reflex-dev patches. Source: https://github.com/${GH_REPO}/tree/${GITHUB_SHA}"
+          fi
