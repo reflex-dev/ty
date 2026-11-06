@@ -1,4 +1,4 @@
 [submodule "ruff"]
 	path = ruff
 	url = https://github.com/reflex-dev/ruff
-	branch = reflex/ty-patches
+	branch = reflex/ty-patches-0.0.99
